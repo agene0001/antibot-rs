@@ -1,0 +1,20 @@
+[package]
+name = "antibot-rs"
+version = "0.1.1"
+edition = "2021"
+license = "MIT"
+description = "Auto-managed Byparr/FlareSolverr client for bypassing bot detection in Rust web scrapers"
+readme = "README.md"
+repository = "https://github.com/agene0001/antibot-rs"
+homepage = "https://github.com/agene0001/antibot-rs"
+documentation = "https://docs.rs/antibot-rs"
+keywords = ["captcha", "scraping", "byparr", "flaresolverr", "anti-bot"]
+categories = ["web-programming", "web-programming::http-client"]
+
+[dependencies]
+reqwest = { version = "0.13.2", features = ["json"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tokio = { version = "1.51.1", features = ["process", "time"] }
+tracing = "0.1.44"
+thiserror = "2.0.18"
