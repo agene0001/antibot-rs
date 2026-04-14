@@ -1,7 +1,7 @@
 //! Auto-managed Byparr/FlareSolverr client for bypassing bot detection.
 //!
 //! Provides a unified client for the FlareSolverr-compatible API used by both
-//! [Byparr](https://github.com/sergerdn/byparr) and
+//! [Byparr](https://github.com/thephaseless/byparr) and
 //! [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr).
 //!
 //! # Features
@@ -50,7 +50,7 @@ impl Provider {
     /// Docker image reference for this provider.
     pub fn image(&self) -> &str {
         match self {
-            Provider::Byparr => "ghcr.io/sergerdn/byparr:latest",
+            Provider::Byparr => "ghcr.io/thephaseless/byparr:latest",
             Provider::FlareSolverr => "ghcr.io/flaresolverr/flaresolverr:latest",
             Provider::Custom(image) => image,
         }

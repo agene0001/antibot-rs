@@ -1,6 +1,6 @@
 # antibot-rs
 
-Auto-managed [Byparr](https://github.com/sergerdn/byparr) / [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) client for bypassing bot detection in Rust web scrapers.
+Auto-managed [Byparr](https://github.com/ThePhaseless/byparr) / [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) client for bypassing bot detection in Rust web scrapers.
 
 ## Features
 
