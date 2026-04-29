@@ -22,4 +22,15 @@ pub enum AntibotError {
 
     #[error("unexpected response: {0}")]
     UnexpectedResponse(String),
+
+    #[error("invalid URL: {0}")]
+    InvalidUrl(String),
+
+    /// A coalesced peer's solve failed; the original error is stringified
+    /// because the underlying error type isn't Clone.
+    #[error("coalesced solve failed: {0}")]
+    CoalescedFailure(String),
+
+    #[error("session not found: {0}")]
+    SessionNotFound(String),
 }
