@@ -1,6 +1,8 @@
 //! Browser fingerprint configuration for solve requests.
 //!
-//! Only Byparr-class providers honor these fields; FlareSolverr ignores them.
+//! FlareSolverr and current upstream Byparr both ignore these fields (Byparr's
+//! request model accepts only `cmd`/`url`/`max_timeout`); they are honored
+//! only by custom FlareSolverr-compatible images that implement them.
 
 use serde::Serialize;
 

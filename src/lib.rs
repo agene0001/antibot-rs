@@ -86,11 +86,11 @@ mod stream;
 mod types;
 mod wire;
 
-pub use client::{merge_cookies, Antibot, AntibotBuilder, SessionHandle};
+pub use client::{Antibot, AntibotBuilder, SessionHandle, merge_cookies};
 pub use coalesce::CoalesceKey;
 pub use cookie::{Cookie, SameSite};
 pub use debug_replay::DebugConfig;
-pub use detect::{detect_challenge, ChallengeKind, DetectionInput};
+pub use detect::{ChallengeKind, DetectionInput, detect_challenge};
 pub use docker::DockerLimits;
 pub use error::AntibotError;
 pub use fingerprint::{BrowserFingerprint, Viewport};
@@ -108,13 +108,22 @@ pub use futures::StreamExt;
 
 /// Docker image provider for the challenge-solving proxy.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub enum Provider {
-    /// Byparr — recommended, actively maintained.
+    /// Byparr — actively maintained, strong Cloudflare bypass (Camoufox).
+    ///
+    /// Caveat: upstream Byparr's API currently supports plain GET solves only
+    /// (`cmd`/`url`/`max_timeout`). POST bodies, sessions, pre-seeded cookies,
+    /// custom headers, proxies, and fingerprints are silently ignored
+    /// server-side; the client logs a warning when they're used.
     #[default]
     Byparr,
-    /// FlareSolverr — the original implementation.
+    /// FlareSolverr — the original implementation. Supports sessions,
+    /// form-encoded POST bodies, pre-seeded cookies, and proxies; ignores
+    /// custom headers and fingerprints.
     FlareSolverr,
     /// Custom Docker image with a FlareSolverr-compatible `/v1` endpoint.
+    /// Also the way to pin a specific image tag instead of `:latest`.
     Custom(String),
 }
 

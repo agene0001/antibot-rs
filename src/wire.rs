@@ -17,6 +17,12 @@ pub(crate) struct WireRequest {
     pub url: Option<String>,
     #[serde(rename = "maxTimeout")]
     pub max_timeout: u64,
+    /// Same timeout in *seconds* under the snake_case key Byparr's request
+    /// model reads (it has no camelCase alias, so `maxTimeout` is silently
+    /// dropped and its 60s default applies). FlareSolverr ignores unknown
+    /// fields, so sending both is safe.
+    #[serde(rename = "max_timeout")]
+    pub max_timeout_secs: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "postData")]
@@ -37,6 +43,12 @@ pub(crate) struct WireRequest {
     pub timezone: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+    #[serde(rename = "returnOnlyCookies", skip_serializing_if = "is_false")]
+    pub return_only_cookies: bool,
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 impl WireRequest {
@@ -77,10 +89,12 @@ impl WireRequest {
             None => (None, None, None, None, None),
         };
 
+        let max_timeout = req.max_timeout_ms.unwrap_or(default_timeout_ms);
         Self {
             cmd,
             url: Some(req.url.clone()),
-            max_timeout: req.max_timeout_ms.unwrap_or(default_timeout_ms),
+            max_timeout,
+            max_timeout_secs: max_timeout.div_ceil(1000),
             session: req.session_id.clone(),
             post_data,
             cookies: req.cookies.clone(),
@@ -91,6 +105,7 @@ impl WireRequest {
             viewport,
             timezone,
             platform,
+            return_only_cookies: req.return_only_cookies,
         }
     }
 
@@ -100,6 +115,7 @@ impl WireRequest {
             cmd: "sessions.create".to_string(),
             url: None,
             max_timeout: 60000,
+            max_timeout_secs: 60,
             session: session_id,
             post_data: None,
             cookies: None,
@@ -110,6 +126,7 @@ impl WireRequest {
             viewport: None,
             timezone: None,
             platform: None,
+            return_only_cookies: false,
         }
     }
 
@@ -119,6 +136,7 @@ impl WireRequest {
             cmd: "sessions.destroy".to_string(),
             url: None,
             max_timeout: 60000,
+            max_timeout_secs: 60,
             session: Some(session_id),
             post_data: None,
             cookies: None,
@@ -129,6 +147,7 @@ impl WireRequest {
             viewport: None,
             timezone: None,
             platform: None,
+            return_only_cookies: false,
         }
     }
 }
@@ -137,7 +156,7 @@ fn encode_post_body(body: &PostBody) -> String {
     match body {
         PostBody::Form(map) => url_encode_form(map),
         PostBody::Json(value) => value.to_string(),
-        PostBody::Raw { body, .. } => String::from_utf8_lossy(body).into_owned(),
+        PostBody::Raw { body, .. } => body.clone(),
     }
 }
 

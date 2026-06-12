@@ -7,6 +7,7 @@
 use http::HeaderMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ChallengeKind {
     Cloudflare,
     DataDome,
@@ -44,7 +45,12 @@ pub struct DetectionInput<'a> {
 
 impl<'a> DetectionInput<'a> {
     pub fn new(status: u16, headers: &'a HeaderMap, body: &'a str, url: &'a str) -> Self {
-        Self { status, headers, body, url }
+        Self {
+            status,
+            headers,
+            body,
+            url,
+        }
     }
 }
 
@@ -147,13 +153,11 @@ fn detect_datadome(input: &DetectionInput) -> bool {
         return true;
     }
 
-    let header_hit = input.headers.get_all("set-cookie").iter().any(|v| {
-        v.to_str()
-            .map(|s| s.contains("datadome="))
-            .unwrap_or(false)
-    });
-
-    header_hit
+    input
+        .headers
+        .get_all("set-cookie")
+        .iter()
+        .any(|v| v.to_str().map(|s| s.contains("datadome=")).unwrap_or(false))
 }
 
 fn detect_perimeterx(input: &DetectionInput) -> bool {

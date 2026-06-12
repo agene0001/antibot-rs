@@ -65,6 +65,11 @@ impl DockerManager {
         &self.container_name
     }
 
+    /// Base URL of the service this manager's container exposes.
+    pub fn base_url(&self) -> String {
+        format!("http://localhost:{}", self.port)
+    }
+
     /// Check if Docker is available on this system.
     pub async fn is_docker_available(&self) -> bool {
         Command::new("docker")
@@ -151,27 +156,79 @@ impl DockerManager {
         Ok(output.success())
     }
 
-    /// Start the container. Creates it if it doesn't exist, starts it if stopped.
-    pub async fn start(&self) -> Result<(), AntibotError> {
-        if self.container_running().await? {
-            debug!("container '{}' is already running", self.container_name);
-            return Ok(());
+    /// Check that an existing container was created from this manager's image
+    /// and publishes the expected host port. A leftover container from an old
+    /// configuration would otherwise be reused silently and fail health checks
+    /// with no hint as to why.
+    async fn container_config_matches(&self) -> Result<bool, AntibotError> {
+        let output = Command::new("docker")
+            .args([
+                "inspect",
+                "--format",
+                "{{.Config.Image}}|{{range $p, $b := .HostConfig.PortBindings}}{{$p}}={{(index $b 0).HostPort}};{{end}}",
+                &self.container_name,
+            ])
+            .output()
+            .await
+            .map_err(|_| AntibotError::DockerNotAvailable)?;
+
+        if !output.status.success() {
+            return Ok(false);
         }
 
-        if self.container_exists().await? {
-            info!("starting existing container '{}'", self.container_name);
-            let output = Command::new("docker")
-                .args(["start", &self.container_name])
-                .output()
-                .await
-                .map_err(|_| AntibotError::DockerNotAvailable)?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut parts = stdout.trim().splitn(2, '|');
+        let image_ok = parts.next() == Some(self.provider.image());
+        let port_ok = parts
+            .next()
+            .is_some_and(|p| p.contains(&format!("8191/tcp={};", self.port)));
+        Ok(image_ok && port_ok)
+    }
 
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(AntibotError::StartFailed(stderr.trim().to_string()));
+    async fn remove_container(&self) -> Result<(), AntibotError> {
+        let output = Command::new("docker")
+            .args(["rm", "-f", &self.container_name])
+            .output()
+            .await
+            .map_err(|_| AntibotError::DockerNotAvailable)?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(AntibotError::StartFailed(stderr.trim().to_string()));
+        }
+        Ok(())
+    }
+
+    /// Start the container. Creates it if it doesn't exist, starts it if
+    /// stopped, and recreates it if it exists with a different image or port.
+    pub async fn start(&self) -> Result<(), AntibotError> {
+        if self.container_exists().await? {
+            if self.container_config_matches().await? {
+                if self.container_running().await? {
+                    debug!("container '{}' is already running", self.container_name);
+                    return Ok(());
+                }
+
+                info!("starting existing container '{}'", self.container_name);
+                let output = Command::new("docker")
+                    .args(["start", &self.container_name])
+                    .output()
+                    .await
+                    .map_err(|_| AntibotError::DockerNotAvailable)?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(AntibotError::StartFailed(stderr.trim().to_string()));
+                }
+
+                return Ok(());
             }
 
-            return Ok(());
+            warn!(
+                "container '{}' exists with a different image or port mapping; recreating",
+                self.container_name
+            );
+            self.remove_container().await?;
         }
 
         if !self.image_exists().await? {
@@ -224,6 +281,29 @@ impl DockerManager {
         Ok(())
     }
 
+    /// Restart the container. Unlike [`DockerManager::start`], this bounces a
+    /// container that is running but unresponsive (hung browser); `start`
+    /// would see it running and do nothing. Falls back to `start` when the
+    /// container is missing or its config no longer matches.
+    pub async fn restart(&self) -> Result<(), AntibotError> {
+        if self.container_exists().await? && self.container_config_matches().await? {
+            info!("restarting container '{}'", self.container_name);
+            let output = Command::new("docker")
+                .args(["restart", "-t", "10", &self.container_name])
+                .output()
+                .await
+                .map_err(|_| AntibotError::DockerNotAvailable)?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(AntibotError::StartFailed(stderr.trim().to_string()));
+            }
+            return Ok(());
+        }
+
+        self.start().await
+    }
+
     /// Stop the container (best-effort, with a short timeout).
     pub async fn stop(&self) -> Result<(), AntibotError> {
         let output = Command::new("docker")
@@ -264,7 +344,9 @@ impl DockerManager {
                 }
             }
 
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            if attempt < max_attempts {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
         }
 
         Err(AntibotError::HealthCheckFailed {

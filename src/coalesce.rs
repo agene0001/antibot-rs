@@ -3,6 +3,7 @@
 //! on the same result.
 
 use crate::error::AntibotError;
+use crate::metrics::Metrics;
 use crate::types::{Solution, SolutionSource};
 use dashmap::DashMap;
 use std::future::Future;
@@ -22,22 +23,42 @@ pub enum CoalesceKey {
 /// stringified error wrapped in [`AntibotError::CoalescedFailure`].
 type SharedResult = Result<Arc<Solution>, Arc<String>>;
 
+type ResultHolder = Arc<sync_mutex::Mutex<Option<SharedResult>>>;
+
 struct InflightSolve {
     notify: Arc<Notify>,
-    result: Arc<parking_lot_mutex::Mutex<Option<SharedResult>>>,
+    result: ResultHolder,
 }
 
 #[derive(Clone)]
 pub(crate) struct SolveCoalescer {
     inflight: Arc<DashMap<String, InflightSolve>>,
     key_strategy: CoalesceKey,
+    metrics: Metrics,
+}
+
+/// Removes the leader's inflight entry and wakes waiters even if the leader's
+/// future is cancelled mid-solve. Without this, a cancelled leader would leave
+/// a stale entry behind and every future solve for the key would wait forever.
+struct LeaderGuard {
+    inflight: Arc<DashMap<String, InflightSolve>>,
+    key: String,
+    notify: Arc<Notify>,
+}
+
+impl Drop for LeaderGuard {
+    fn drop(&mut self) {
+        self.inflight.remove(&self.key);
+        self.notify.notify_waiters();
+    }
 }
 
 impl SolveCoalescer {
-    pub fn new(key_strategy: CoalesceKey) -> Self {
+    pub fn new(key_strategy: CoalesceKey, metrics: Metrics) -> Self {
         Self {
             inflight: Arc::new(DashMap::new()),
             key_strategy,
+            metrics,
         }
     }
 
@@ -59,65 +80,116 @@ impl SolveCoalescer {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Solution, AntibotError>>,
     {
-        // Fast path: check if a leader is already running.
-        if let Some(existing) = self.inflight.get(&key) {
-            let notify = existing.notify.clone();
-            let result_holder = existing.result.clone();
-            drop(existing);
+        let mut solver = Some(solver);
+        let mut wait_recorded = false;
 
-            notify.notified().await;
-
-            let snapshot = result_holder.lock().clone();
-            return match snapshot {
-                Some(Ok(arc_sol)) => Ok(stamp_cached((*arc_sol).clone())),
-                Some(Err(arc_msg)) => Err(AntibotError::CoalescedFailure((*arc_msg).clone())),
-                None => Err(AntibotError::CoalescedFailure(
-                    "leader vanished without producing a result".to_string(),
-                )),
+        loop {
+            // Atomically either join an in-flight solve or claim leadership.
+            // The entry guard locks the shard, so no awaits while it's held.
+            let role = {
+                use dashmap::mapref::entry::Entry;
+                match self.inflight.entry(key.clone()) {
+                    Entry::Occupied(occupied) => {
+                        let slot = occupied.get();
+                        Role::Waiter {
+                            notify: slot.notify.clone(),
+                            result: slot.result.clone(),
+                        }
+                    }
+                    Entry::Vacant(vacant) => {
+                        let notify = Arc::new(Notify::new());
+                        let result: ResultHolder = Arc::new(sync_mutex::Mutex::new(None));
+                        vacant.insert(InflightSolve {
+                            notify: notify.clone(),
+                            result: result.clone(),
+                        });
+                        Role::Leader { notify, result }
+                    }
+                }
             };
+
+            match role {
+                Role::Leader { notify, result } => {
+                    let _guard = LeaderGuard {
+                        inflight: self.inflight.clone(),
+                        key: key.clone(),
+                        notify,
+                    };
+
+                    let outcome = solver.take().expect("leader claimed twice")().await;
+
+                    // Publish a Clone-friendly version for waiters before the
+                    // guard removes the entry and notifies them.
+                    let shared: SharedResult = match &outcome {
+                        Ok(sol) => Ok(Arc::new(sol.clone())),
+                        Err(e) => Err(Arc::new(e.to_string())),
+                    };
+                    *result.lock() = Some(shared);
+
+                    return outcome;
+                }
+                Role::Waiter { notify, result } => {
+                    // Once per call, even if a cancelled leader forces a retry.
+                    if !wait_recorded {
+                        self.metrics.record_coalesced_wait();
+                        wait_recorded = true;
+                    }
+
+                    // Register interest BEFORE checking the result, otherwise
+                    // the leader's notify_waiters() can fire in the gap and the
+                    // wakeup is lost forever.
+                    let notified = notify.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+
+                    if let Some(snapshot) = result.lock().clone() {
+                        return waiter_outcome(snapshot);
+                    }
+
+                    // The leader may have finished (or been cancelled) between
+                    // our entry lookup and registration; if its entry is gone,
+                    // no further notification is coming.
+                    let still_inflight = self
+                        .inflight
+                        .get(&key)
+                        .map(|e| Arc::ptr_eq(&e.result, &result))
+                        .unwrap_or(false);
+                    if !still_inflight {
+                        match result.lock().clone() {
+                            Some(snapshot) => return waiter_outcome(snapshot),
+                            // Leader was cancelled without a result; retry.
+                            None => continue,
+                        }
+                    }
+
+                    notified.await;
+
+                    match result.lock().clone() {
+                        Some(snapshot) => return waiter_outcome(snapshot),
+                        // Leader was cancelled without a result; retry.
+                        None => continue,
+                    }
+                }
+            }
         }
+    }
+}
 
-        // Slow path: insert inflight slot, then double-check we won the race.
-        let notify = Arc::new(Notify::new());
-        let result_holder = Arc::new(parking_lot_mutex::Mutex::new(None));
+enum Role {
+    Leader {
+        notify: Arc<Notify>,
+        result: ResultHolder,
+    },
+    Waiter {
+        notify: Arc<Notify>,
+        result: ResultHolder,
+    },
+}
 
-        let entry = self.inflight.entry(key.clone()).or_insert_with(|| InflightSolve {
-            notify: notify.clone(),
-            result: result_holder.clone(),
-        });
-
-        // If another task slipped in between the get() above and this insert,
-        // fall back to waiter behavior.
-        let we_are_leader = Arc::ptr_eq(&entry.notify, &notify);
-        let actual_notify = entry.notify.clone();
-        let actual_result = entry.result.clone();
-        drop(entry);
-
-        if !we_are_leader {
-            actual_notify.notified().await;
-            let snapshot = actual_result.lock().clone();
-            return match snapshot {
-                Some(Ok(arc_sol)) => Ok(stamp_cached((*arc_sol).clone())),
-                Some(Err(arc_msg)) => Err(AntibotError::CoalescedFailure((*arc_msg).clone())),
-                None => Err(AntibotError::CoalescedFailure(
-                    "leader vanished without producing a result".to_string(),
-                )),
-            };
-        }
-
-        // We are the leader. Run the solver.
-        let outcome = solver().await;
-
-        // Publish a Clone-friendly version for waiters.
-        let shared: SharedResult = match &outcome {
-            Ok(sol) => Ok(Arc::new(sol.clone())),
-            Err(e) => Err(Arc::new(e.to_string())),
-        };
-        *result_holder.lock() = Some(shared);
-        self.inflight.remove(&key);
-        notify.notify_waiters();
-
-        outcome
+fn waiter_outcome(snapshot: SharedResult) -> Result<Solution, AntibotError> {
+    match snapshot {
+        Ok(arc_sol) => Ok(stamp_cached((*arc_sol).clone())),
+        Err(arc_msg) => Err(AntibotError::CoalescedFailure((*arc_msg).clone())),
     }
 }
 
@@ -129,10 +201,9 @@ fn stamp_cached(mut sol: Solution) -> Solution {
     sol
 }
 
-// Tiny re-export shim: tokio doesn't ship a sync Mutex outside of `parking_lot`,
-// and we don't want to await across guard holds. Use std::sync::Mutex with a
-// Result-friendly wrapper to avoid the poisoning surface.
-mod parking_lot_mutex {
+// std::sync::Mutex wrapper that ignores poisoning: guards are only held for
+// cheap clone/assign operations, never across awaits.
+mod sync_mutex {
     use std::sync::Mutex as StdMutex;
 
     pub struct Mutex<T>(StdMutex<T>);
@@ -143,9 +214,6 @@ mod parking_lot_mutex {
         }
 
         pub fn lock(&self) -> std::sync::MutexGuard<'_, T> {
-            // A panic while a result is being published is a bug; surface it
-            // via panic propagation instead of carrying poisoning into the
-            // public error type.
             self.0.lock().unwrap_or_else(|e| e.into_inner())
         }
     }

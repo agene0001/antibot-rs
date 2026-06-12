@@ -18,8 +18,15 @@ pub struct SolveRequest {
     pub proxy: Option<ProxyConfig>,
     /// If true, bypass the session cache for this request only.
     pub bypass_cache: bool,
-    /// Optional browser fingerprint hints (only honored by Byparr-class providers).
+    /// Optional browser fingerprint hints. FlareSolverr and current upstream
+    /// Byparr both ignore these; only custom FlareSolverr-compatible images
+    /// that implement the fields honor them.
     pub fingerprint: Option<BrowserFingerprint>,
+    /// If true, ask the provider to skip returning the rendered HTML
+    /// (`returnOnlyCookies`). Useful for warming the session cache without
+    /// shipping megabytes of page content; [`crate::Solution::response`] will
+    /// be `None`.
+    pub return_only_cookies: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -34,11 +41,10 @@ pub enum PostBody {
     Form(HashMap<String, String>),
     /// JSON body sent as `application/json`.
     Json(serde_json::Value),
-    /// Raw body with caller-specified content type.
-    Raw {
-        content_type: String,
-        body: Vec<u8>,
-    },
+    /// Raw body with caller-specified content type. The FlareSolverr wire
+    /// protocol is JSON, so bodies must be text — binary payloads can't be
+    /// transported.
+    Raw { content_type: String, body: String },
 }
 
 impl SolveRequest {
@@ -53,6 +59,7 @@ impl SolveRequest {
             proxy: None,
             bypass_cache: false,
             fingerprint: None,
+            return_only_cookies: false,
         }
     }
 
@@ -69,6 +76,7 @@ impl SolveRequest {
             proxy: None,
             bypass_cache: false,
             fingerprint: None,
+            return_only_cookies: false,
         }
     }
 
@@ -79,7 +87,10 @@ impl SolveRequest {
         V: Into<String>,
         I: IntoIterator<Item = (K, V)>,
     {
-        let map = fields.into_iter().map(|(k, v)| (k.into(), v.into())).collect();
+        let map = fields
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect();
         self.method = SolveMethod::Post {
             body: PostBody::Form(map),
         };
@@ -94,12 +105,13 @@ impl SolveRequest {
         self
     }
 
-    /// Set a raw body. Replaces any existing body.
-    pub fn raw_body(mut self, content_type: impl Into<String>, body: Vec<u8>) -> Self {
+    /// Set a raw text body. Replaces any existing body. The wire protocol is
+    /// JSON, so binary payloads can't be transported.
+    pub fn raw_body(mut self, content_type: impl Into<String>, body: impl Into<String>) -> Self {
         self.method = SolveMethod::Post {
             body: PostBody::Raw {
                 content_type: content_type.into(),
-                body,
+                body: body.into(),
             },
         };
         self
@@ -149,6 +161,13 @@ impl SolveRequest {
 
     pub fn with_fingerprint(mut self, fingerprint: BrowserFingerprint) -> Self {
         self.fingerprint = Some(fingerprint);
+        self
+    }
+
+    /// Skip returning the rendered HTML; only cookies and the user-agent are
+    /// fetched. The solve still happens — this just shrinks the payload.
+    pub fn return_only_cookies(mut self) -> Self {
+        self.return_only_cookies = true;
         self
     }
 }
