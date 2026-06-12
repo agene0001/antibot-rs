@@ -18,13 +18,13 @@ impl Antibot {
     /// pairs as solves complete.
     pub fn solve_stream<I>(&self, urls: I, concurrency: usize) -> SolveStream<'_>
     where
-        I: IntoIterator<Item = String> + Send + 'static,
+        I: IntoIterator<Item = String>,
+        I::IntoIter: Send + 'static,
     {
         let client = self.clone();
         let concurrency = concurrency.max(1);
 
-        let urls_vec: Vec<String> = urls.into_iter().collect();
-        let stream = futures::stream::iter(urls_vec)
+        let stream = futures::stream::iter(urls)
             .map(move |url| {
                 let c = client.clone();
                 async move {
@@ -40,13 +40,13 @@ impl Antibot {
     /// Same as [`Antibot::solve_stream`] but takes full [`SolveRequest`]s.
     pub fn execute_stream<I>(&self, requests: I, concurrency: usize) -> SolveStream<'_>
     where
-        I: IntoIterator<Item = SolveRequest> + Send + 'static,
+        I: IntoIterator<Item = SolveRequest>,
+        I::IntoIter: Send + 'static,
     {
         let client = self.clone();
         let concurrency = concurrency.max(1);
 
-        let requests_vec: Vec<SolveRequest> = requests.into_iter().collect();
-        let stream = futures::stream::iter(requests_vec)
+        let stream = futures::stream::iter(requests)
             .map(move |req| {
                 let c = client.clone();
                 async move {

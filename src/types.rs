@@ -32,10 +32,17 @@ pub struct Solution {
 }
 
 impl Solution {
-    /// Format cookies as a `Cookie` header value.
+    /// Format cookies as a `Cookie` header value, skipping any cookie with an
+    /// expiry in the past. A non-positive `expires` (e.g. `-1`) is the
+    /// FlareSolverr/Byparr convention for a session cookie and is kept.
     pub fn cookie_header(&self) -> String {
+        let now = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
         self.cookies
             .iter()
+            .filter(|c| c.expires.is_none_or(|e| e <= 0.0 || e > now))
             .map(|c| format!("{}={}", c.name, c.value))
             .collect::<Vec<_>>()
             .join("; ")
@@ -52,7 +59,9 @@ impl Solution {
             status: s.status,
             cookies: s.cookies,
             user_agent: s.user_agent,
-            response: Some(s.response),
+            // Providers omit or blank the body for returnOnlyCookies solves;
+            // normalize that to None so callers get one shape to check.
+            response: (!s.response.is_empty()).then_some(s.response),
             solved_at: SystemTime::now(),
             source: SolutionSource::Fresh,
         }
@@ -67,6 +76,7 @@ pub(crate) struct WireSolution {
     pub cookies: Vec<Cookie>,
     #[serde(rename = "userAgent")]
     pub user_agent: String,
+    #[serde(default)]
     pub response: String,
 }
 

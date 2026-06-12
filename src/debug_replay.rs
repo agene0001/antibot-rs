@@ -4,8 +4,8 @@
 use crate::types::Solution;
 use serde::Serialize;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::warn;
 
 #[derive(Debug, Clone)]
@@ -29,13 +29,22 @@ impl DebugConfig {
 pub(crate) struct DebugSink {
     config: DebugConfig,
     counter: Arc<AtomicU64>,
+    /// Unix timestamp at sink creation, prefixed to every artifact so a new
+    /// run (whose counter restarts at 0) can't overwrite a previous run's
+    /// dumps.
+    run_id: u64,
 }
 
 impl DebugSink {
     pub fn new(config: DebugConfig) -> Self {
+        let run_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         Self {
             config,
             counter: Arc::new(AtomicU64::new(0)),
+            run_id,
         }
     }
 
@@ -51,7 +60,7 @@ impl DebugSink {
         tokio::fs::create_dir_all(&self.config.directory).await?;
 
         let n = self.counter.fetch_add(1, Ordering::Relaxed);
-        let stem = format!("{:06}_{}", n, slug_from_url(url));
+        let stem = format!("{}_{:06}_{}", self.run_id, n, slug_from_url(url));
         let html_path = self.config.directory.join(format!("{}.html", stem));
         let meta_path = self.config.directory.join(format!("{}.json", stem));
 
@@ -83,7 +92,6 @@ impl DebugSink {
 
         Ok(())
     }
-
 }
 
 #[derive(Serialize)]
@@ -126,9 +134,5 @@ fn slug_from_url(url: &str) -> String {
             s.push('_');
         }
     }
-    if s.is_empty() {
-        "page".to_string()
-    } else {
-        s
-    }
+    if s.is_empty() { "page".to_string() } else { s }
 }

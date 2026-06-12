@@ -1,7 +1,7 @@
 //! Lock-free metrics. Snapshot via [`Antibot::metrics`](crate::Antibot::metrics).
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Default)]
 pub(crate) struct MetricsInner {
@@ -54,7 +54,9 @@ impl Metrics {
     }
 
     pub fn record_container_restart(&self) {
-        self.inner.container_restarts.fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .container_restarts
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn snapshot(&self) -> MetricsSnapshot {

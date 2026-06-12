@@ -14,9 +14,36 @@ Auto-managed [Byparr](https://github.com/ThePhaseless/byparr) / [FlareSolverr](h
 - **Persistent sessions** — `create_session()` returns a `SessionHandle` for multi-step flows
 - **Metrics** — lock-free counters: success rate, avg solve time, cache hits, coalesced waits, retries, restarts
 - **Debug / replay sink** — dump every solved page + cookie metadata to disk for inspection
-- **Multi-instance pool** — round-robin across multiple solver containers
+- **Multi-instance pool** — least-loaded routing across solver containers, with an optional per-instance concurrency cap for backpressure
 - **`solve_stream`** — bounded-concurrency stream of solved pages for batch jobs
 - **Standalone challenge detection** — cheap `detect_challenge(...)` helpers, no solver call
+
+## Provider compatibility
+
+Not every provider implements the full FlareSolverr API. When a request uses an
+unsupported feature, the client either **errors** (for features whose silent
+failure would mislead you) or **warns once** (for fields harmlessly ignored
+server-side):
+
+| Feature | Byparr (upstream) | FlareSolverr |
+|---|---|---|
+| GET solves | ✅ | ✅ |
+| POST bodies | ❌ **errors** | ✅ form-encoded only |
+| Persistent sessions | ❌ **errors** | ✅ |
+| Pre-seeded cookies | ⚠️ ignored | ✅ |
+| Proxies | ⚠️ ignored | ✅ |
+| Custom headers | ⚠️ ignored | ⚠️ ignored |
+| Fingerprint hints | ⚠️ ignored | ⚠️ ignored |
+
+Byparr's request model currently accepts only `cmd`/`url`/`max_timeout`
+("currently only supports GET requests"). If you need sessions, POST, or
+proxies, use `Provider::FlareSolverr` — or point `Provider::Custom` at any
+image that implements the fields you need.
+
+These checks require the client to know which provider is behind the URL. That
+is automatic with `.auto_start(true)`; for a pre-running instance, declare it
+with `Antibot::connect_with(url, Provider::Byparr)` (or `connect_many_with`).
+Plain `connect`/`connect_many` assume nothing and skip the checks.
 
 ## When to use this
 
@@ -145,14 +172,24 @@ while let Some((url, result)) = stream.next().await {
 
 ## Multi-instance pool
 
+Each solver runs a single headless browser, so the way to scale throughput is to
+run more instances — solves are routed to the **least-loaded** one, and an
+optional per-instance cap applies backpressure instead of overrunning a browser.
+
 ```rust
 let client = Antibot::builder()
     .auto_start(true)
     .add_instance("http://other-host:8191")
     .add_instance("http://third-host:8191")
+    // At most 2 solves in flight per instance; excess solves wait.
+    .max_inflight_per_instance(2)
     .build()
     .await?;
-// Requests now round-robin across all three URLs.
+// Requests route to whichever instance is least busy.
+
+// With backpressure on, you can over-subscribe the stream and let the pool
+// self-pace rather than hand-tuning concurrency to the instance count:
+let mut stream = client.solve_stream(urls, /* concurrency */ 16);
 ```
 
 ## Challenge detection (no solver call)
