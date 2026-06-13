@@ -6,6 +6,9 @@ pub enum AntibotError {
     #[error("Docker is not installed or not running")]
     DockerNotAvailable,
 
+    #[error("failed to start the Docker daemon: {0}")]
+    DaemonStartFailed(String),
+
     #[error("failed to pull image {image}: {reason}")]
     PullFailed { image: String, reason: String },
 

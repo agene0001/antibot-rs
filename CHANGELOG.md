@@ -3,6 +3,19 @@
 All notable changes to this project are documented here. This project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - Unreleased
+
+### Added
+
+- Optional Docker **daemon** auto-start. With `auto_start` on,
+  `AntibotBuilder::start_docker_daemon(true)` starts the Docker daemon if it
+  isn't running and waits for it to become ready before creating the container.
+  Per-OS default: Docker Desktop on macOS/Windows, `systemctl start docker` on
+  Linux. `docker_daemon_start_command(program, args)` overrides the command (for
+  rootless Docker, Colima, OrbStack, etc.), and `daemon_start_timeout(..)` tunes
+  the readiness wait (default 60s). New `AntibotError::DaemonStartFailed`. If the
+  `docker` CLI isn't installed, `DockerNotAvailable` is still returned.
+
 ## [0.3.0] - Unreleased
 
 ### Breaking

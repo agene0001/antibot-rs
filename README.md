@@ -5,7 +5,7 @@ Auto-managed [Byparr](https://github.com/ThePhaseless/byparr) / [FlareSolverr](h
 ## Features
 
 - **Provider-agnostic** — Byparr, FlareSolverr, or any compatible Docker image
-- **Docker lifecycle** — auto-pull, start, health-wait, optional auto-restart on failure, optional stop-on-drop
+- **Docker lifecycle** — optional daemon auto-start, auto-pull, start, health-wait, optional auto-restart on failure, optional stop-on-drop
 - **Resource limits** — memory / CPU / shm-size caps on the spawned container
 - **Rich `SolveRequest`** — GET/POST, custom headers and cookies, per-request proxy, browser fingerprint hints
 - **Per-domain session cache** — repeat solves for the same domain are cookie-cache hits
@@ -219,16 +219,53 @@ let client = Antibot::connect("http://localhost:8191");
 let solution = client.solve("https://example.com").await?;
 ```
 
+## Auto-start the Docker daemon
+
+If the Docker daemon itself might be down, opt into starting it (only happens
+with `auto_start`):
+
+```rust
+let client = Antibot::builder()
+    .auto_start(true)
+    .start_docker_daemon(true)              // launch Docker if the daemon is down
+    .daemon_start_timeout(Duration::from_secs(90))
+    .build()
+    .await?;
+```
+
+Defaults per OS: Docker Desktop on macOS/Windows, `systemctl start docker` on
+Linux. The Linux default needs privileges; for rootless Docker / Colima /
+OrbStack, supply your own command:
+
+```rust
+let client = Antibot::builder()
+    .auto_start(true)
+    .docker_daemon_start_command("colima", ["start"])   // implies start_docker_daemon(true)
+    .build()
+    .await?;
+```
+
+If the `docker` CLI isn't installed at all, this can't help — you'll still get
+`DockerNotAvailable`.
+
 ## Requirements
 
-- Docker installed and accessible (only when `auto_start` is on)
+- Docker installed and accessible (only when `auto_start` is on; the daemon can
+  be auto-started with `start_docker_daemon(true)`)
 - One of: Byparr, FlareSolverr, or any compatible image with a `/v1` endpoint
 
 ## Troubleshooting
 
 **`DockerNotAvailable` on `build()`**
-You enabled `auto_start(true)` but the Docker daemon isn't running. Either start Docker Desktop, or
-use `Antibot::connect("http://...")` against an externally-managed instance.
+You enabled `auto_start(true)` but the Docker daemon isn't running (or the `docker` CLI isn't
+installed). Start Docker Desktop, add `.start_docker_daemon(true)` to have the client launch it,
+or use `Antibot::connect("http://...")` against an externally-managed instance.
+
+**`DaemonStartFailed` after `start_docker_daemon(true)`**
+The client tried to start the daemon but the command failed or it didn't come up in time. On Linux
+the default (`systemctl start docker`) needs privileges — pass a custom command via
+`.docker_daemon_start_command(...)` (e.g. `colima start`, or `sudo systemctl start docker`), or
+raise `.daemon_start_timeout(...)` if Docker Desktop is just slow to boot.
 
 **`HealthCheckFailed` after `auto_start`**
 The container started but isn't responding on the host port. Most common causes:
