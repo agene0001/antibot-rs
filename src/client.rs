@@ -943,6 +943,9 @@ pub struct AntibotBuilder {
     manage_lifecycle: bool,
     health_watch_interval: Option<Duration>,
     max_inflight_per_instance: Option<usize>,
+    start_docker_daemon: bool,
+    daemon_start_override: Option<(String, Vec<String>)>,
+    daemon_start_timeout: Duration,
 }
 
 impl Default for AntibotBuilder {
@@ -964,6 +967,9 @@ impl Default for AntibotBuilder {
             manage_lifecycle: false,
             health_watch_interval: None,
             max_inflight_per_instance: None,
+            start_docker_daemon: false,
+            daemon_start_override: None,
+            daemon_start_timeout: Duration::from_secs(60),
         }
     }
 }
@@ -1041,6 +1047,41 @@ impl AntibotBuilder {
         self
     }
 
+    /// When `auto_start` is on and the Docker daemon isn't running, attempt to
+    /// start it (and wait for it to become ready) before creating the
+    /// container. Off by default.
+    ///
+    /// Uses a per-OS default: Docker Desktop on macOS/Windows, `systemctl start
+    /// docker` on Linux. The Linux default needs privileges — for rootless
+    /// Docker, Colima, OrbStack, etc. supply your own command with
+    /// [`docker_daemon_start_command`](Self::docker_daemon_start_command). Has
+    /// no effect without `auto_start`.
+    pub fn start_docker_daemon(mut self, enabled: bool) -> Self {
+        self.start_docker_daemon = enabled;
+        self
+    }
+
+    /// Override the command used to start the Docker daemon (implies
+    /// [`start_docker_daemon(true)`](Self::start_docker_daemon)). For example,
+    /// `("colima", ["start"])` or `("sudo", ["systemctl", "start", "docker"])`.
+    pub fn docker_daemon_start_command(
+        mut self,
+        program: impl Into<String>,
+        args: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.start_docker_daemon = true;
+        self.daemon_start_override =
+            Some((program.into(), args.into_iter().map(Into::into).collect()));
+        self
+    }
+
+    /// How long to wait for the daemon to become ready after starting it
+    /// (default 60s — Docker Desktop boots a VM).
+    pub fn daemon_start_timeout(mut self, timeout: Duration) -> Self {
+        self.daemon_start_timeout = timeout;
+        self
+    }
+
     /// Add an additional pre-existing instance URL. Combined with the
     /// `auto_start`/`port` instance, requests are routed least-loaded-first
     /// across all of them.
@@ -1091,7 +1132,14 @@ impl AntibotBuilder {
             }
             manager = manager.with_limits(self.docker_limits);
 
-            if !manager.is_docker_available().await {
+            if self.start_docker_daemon {
+                manager
+                    .ensure_running(
+                        self.daemon_start_override.as_ref(),
+                        self.daemon_start_timeout,
+                    )
+                    .await?;
+            } else if !manager.is_docker_available().await {
                 return Err(AntibotError::DockerNotAvailable);
             }
 

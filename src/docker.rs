@@ -1,8 +1,34 @@
 use crate::{AntibotError, Provider};
+use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
 const CONTAINER_NAME: &str = "antibot-solver";
+
+/// Best-effort command to start the Docker daemon on the current OS.
+/// `None` if we don't have a sensible default for this platform.
+fn default_daemon_start() -> Option<(String, Vec<String>)> {
+    if cfg!(target_os = "macos") {
+        // Launches Docker Desktop; returns immediately while the VM boots.
+        Some(("open".into(), vec!["-a".into(), "Docker".into()]))
+    } else if cfg!(target_os = "windows") {
+        Some((
+            "cmd".into(),
+            vec![
+                "/C".into(),
+                "start".into(),
+                "".into(),
+                r"C:\Program Files\Docker\Docker\Docker Desktop.exe".into(),
+            ],
+        ))
+    } else if cfg!(target_os = "linux") {
+        // Assumes systemd-managed system Docker; needs privileges. Rootless,
+        // Colima, OrbStack, etc. should pass a custom start command.
+        Some(("systemctl".into(), vec!["start".into(), "docker".into()]))
+    } else {
+        None
+    }
+}
 
 /// Resource caps applied to the spawned container.
 ///
@@ -70,7 +96,8 @@ impl DockerManager {
         format!("http://localhost:{}", self.port)
     }
 
-    /// Check if Docker is available on this system.
+    /// Check if Docker is available on this system (CLI present *and* daemon
+    /// reachable — `docker info` fails if the daemon isn't running).
     pub async fn is_docker_available(&self) -> bool {
         Command::new("docker")
             .arg("info")
@@ -79,6 +106,90 @@ impl DockerManager {
             .status()
             .await
             .is_ok_and(|s| s.success())
+    }
+
+    /// Whether the `docker` CLI is installed (regardless of daemon state).
+    async fn docker_cli_present(&self) -> bool {
+        Command::new("docker")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .is_ok_and(|s| s.success())
+    }
+
+    /// Ensure the Docker daemon is running, starting it if necessary and
+    /// waiting up to `max_wait` for it to become ready.
+    ///
+    /// If `custom_start` is `Some`, that command is used to start the daemon;
+    /// otherwise a per-OS default is used (Docker Desktop on macOS/Windows,
+    /// `systemctl start docker` on Linux). Returns [`AntibotError::DockerNotAvailable`]
+    /// when the `docker` CLI isn't installed (nothing we can start), or
+    /// [`AntibotError::DaemonStartFailed`] when the start command fails or the
+    /// daemon doesn't come up in time.
+    pub async fn ensure_running(
+        &self,
+        custom_start: Option<&(String, Vec<String>)>,
+        max_wait: Duration,
+    ) -> Result<(), AntibotError> {
+        if self.is_docker_available().await {
+            return Ok(());
+        }
+
+        if !self.docker_cli_present().await {
+            // No docker binary — starting a daemon won't help.
+            return Err(AntibotError::DockerNotAvailable);
+        }
+
+        let (program, args) = custom_start
+            .cloned()
+            .or_else(default_daemon_start)
+            .ok_or_else(|| {
+                AntibotError::DaemonStartFailed(
+                    "no default daemon-start command for this OS; pass a custom one".into(),
+                )
+            })?;
+
+        info!(
+            "Docker daemon not running; starting it via `{} {}`",
+            program,
+            args.join(" ")
+        );
+
+        let output = Command::new(&program)
+            .args(&args)
+            .output()
+            .await
+            .map_err(|e| {
+                AntibotError::DaemonStartFailed(format!("could not run `{program}`: {e}"))
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(AntibotError::DaemonStartFailed(format!(
+                "`{program}` failed ({}): {}",
+                output.status,
+                stderr.trim()
+            )));
+        }
+
+        // The launcher returns before the daemon is usable (Docker Desktop
+        // boots a VM), so poll until `docker info` succeeds.
+        let deadline = Instant::now() + max_wait;
+        loop {
+            if self.is_docker_available().await {
+                info!("Docker daemon is ready");
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(AntibotError::DaemonStartFailed(format!(
+                    "daemon did not become ready within {}s",
+                    max_wait.as_secs()
+                )));
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
     }
 
     /// Check if the container exists (running or stopped).
