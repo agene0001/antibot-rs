@@ -3,6 +3,28 @@
 All notable changes to this project are documented here. This project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2]
+
+### Fixed
+
+- **`start_docker_daemon` could hang forever while Docker Desktop was booting.**
+  The readiness poll ran `docker info` with no timeout, but while Docker Desktop
+  (Windows/macOS) is still bringing up its VM, `docker info` connects to the
+  daemon pipe/socket and blocks rather than failing fast. A single hung probe
+  wedged the poll loop indefinitely — the loop's deadline check sits after the
+  probe `.await`, so `daemon_start_timeout` could never fire. Each probe is now
+  bounded by a 5s timeout (with `kill_on_drop`), so the loop keeps polling and
+  honors its deadline.
+
+### Changed
+
+- Default `daemon_start_timeout` is now OS-aware: **240s on Windows/macOS**
+  (Docker Desktop cold-boots a VM) and **60s on Linux** (native dockerd starts
+  in seconds, keeping failure detection fast). Still overridable via
+  `AntibotBuilder::daemon_start_timeout`.
+- The daemon-not-ready error now points at `daemon_start_timeout` / starting
+  Docker beforehand.
+
 ## [0.3.1] - Unreleased
 
 ### Added

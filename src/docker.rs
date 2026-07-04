@@ -98,14 +98,25 @@ impl DockerManager {
 
     /// Check if Docker is available on this system (CLI present *and* daemon
     /// reachable — `docker info` fails if the daemon isn't running).
+    ///
+    /// The `docker info` call is bounded by a 5s timeout: while Docker Desktop
+    /// is mid-boot (Windows/macOS VM), `docker info` connects to the daemon
+    /// pipe/socket and BLOCKS waiting for a response instead of failing fast.
+    /// Without the timeout, a single hung probe would wedge the
+    /// `ensure_daemon_running` poll loop forever — the loop's deadline check
+    /// sits after this `.await`, so it could never fire. `kill_on_drop` reaps
+    /// the probe process when the timeout elapses.
     pub async fn is_docker_available(&self) -> bool {
-        Command::new("docker")
+        let probe = Command::new("docker")
             .arg("info")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status()
-            .await
-            .is_ok_and(|s| s.success())
+            .kill_on_drop(true)
+            .status();
+        matches!(
+            tokio::time::timeout(Duration::from_secs(5), probe).await,
+            Ok(Ok(status)) if status.success()
+        )
     }
 
     /// Whether the `docker` CLI is installed (regardless of daemon state).
@@ -184,7 +195,10 @@ impl DockerManager {
             }
             if Instant::now() >= deadline {
                 return Err(AntibotError::DaemonStartFailed(format!(
-                    "daemon did not become ready within {}s",
+                    "daemon did not become ready within {}s — Docker Desktop can \
+                     take longer to cold-boot; increase the wait via \
+                     `AntibotBuilder::daemon_start_timeout`, or start Docker \
+                     before running so it is already warm",
                     max_wait.as_secs()
                 )));
             }

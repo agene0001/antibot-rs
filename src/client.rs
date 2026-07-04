@@ -969,7 +969,17 @@ impl Default for AntibotBuilder {
             max_inflight_per_instance: None,
             start_docker_daemon: false,
             daemon_start_override: None,
-            daemon_start_timeout: Duration::from_secs(60),
+            // Docker Desktop (Windows/macOS) boots a VM, so a cold start
+            // routinely exceeds a minute; native Linux dockerd starts in
+            // seconds, so a short wait there keeps failure detection fast.
+            // The wait loop is only reached after the launch command
+            // succeeds, so the longer default only applies while Docker is
+            // genuinely starting. Override via `daemon_start_timeout`.
+            daemon_start_timeout: if cfg!(any(target_os = "windows", target_os = "macos")) {
+                Duration::from_secs(240)
+            } else {
+                Duration::from_secs(60)
+            },
         }
     }
 }
