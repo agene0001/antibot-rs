@@ -1,6 +1,6 @@
 [package]
 name = "antibot-rs"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 license = "MIT"
 description = "Auto-managed Byparr/FlareSolverr client for bypassing bot detection in Rust web scrapers"

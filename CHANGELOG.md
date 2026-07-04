@@ -3,6 +3,22 @@
 All notable changes to this project are documented here. This project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3]
+
+### Changed
+
+- **`docker pull` now streams progress instead of running silently.** The
+  first-run pull of a large solver image can take minutes; the output was
+  captured, so the only visible sign was a single "pulling" log followed by a
+  long silence indistinguishable from a hang. Stdout/stderr are now inherited
+  so Docker's own progress renders live, and the completion log reports elapsed
+  seconds.
+- **The daemon-readiness wait loop logs a heartbeat every ~10s** (`waiting for
+  Docker daemon to become ready… Ns/240s`) and the ready/pull logs now include
+  elapsed time. Combined with the 5s-bounded probe from 0.3.2, a genuinely
+  still-booting daemon is now visibly distinct from a wedge — the previous
+  loop was silent per-iteration, so a working-but-slow cold boot looked dead.
+
 ## [0.3.2]
 
 ### Fixed

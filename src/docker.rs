@@ -186,14 +186,20 @@ impl DockerManager {
         }
 
         // The launcher returns before the daemon is usable (Docker Desktop
-        // boots a VM), so poll until `docker info` succeeds.
-        let deadline = Instant::now() + max_wait;
+        // boots a VM), so poll until `docker info` succeeds. Each probe is
+        // 5s-bounded (see `is_docker_available`), so the loop can never wedge;
+        // a heartbeat every ~10s makes a genuinely-still-booting daemon
+        // visibly distinct from a hang.
+        let started = Instant::now();
+        let deadline = started + max_wait;
+        let mut last_heartbeat = started;
         loop {
             if self.is_docker_available().await {
-                info!("Docker daemon is ready");
+                info!("Docker daemon is ready ({}s)", started.elapsed().as_secs());
                 return Ok(());
             }
-            if Instant::now() >= deadline {
+            let now = Instant::now();
+            if now >= deadline {
                 return Err(AntibotError::DaemonStartFailed(format!(
                     "daemon did not become ready within {}s — Docker Desktop can \
                      take longer to cold-boot; increase the wait via \
@@ -201,6 +207,14 @@ impl DockerManager {
                      before running so it is already warm",
                     max_wait.as_secs()
                 )));
+            }
+            if now.duration_since(last_heartbeat) >= Duration::from_secs(10) {
+                info!(
+                    "waiting for Docker daemon to become ready… {}s/{}s",
+                    started.elapsed().as_secs(),
+                    max_wait.as_secs()
+                );
+                last_heartbeat = now;
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
@@ -246,25 +260,34 @@ impl DockerManager {
     }
 
     /// Pull the provider's Docker image.
+    ///
+    /// Stdout/stderr are **inherited** so Docker's own pull progress streams to
+    /// the terminal. A first-run pull of a large solver image can take minutes;
+    /// capturing the output (as this used to) left a silent gap between the
+    /// "pulling" log and completion that was indistinguishable from a hang.
     pub async fn pull_image(&self) -> Result<(), AntibotError> {
         let image = self.provider.image();
-        info!("pulling Docker image: {}", image);
+        let started = Instant::now();
+        info!("pulling Docker image (progress streams below): {}", image);
 
-        let output = Command::new("docker")
+        let status = Command::new("docker")
             .args(["pull", image])
-            .output()
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status()
             .await
             .map_err(|_| AntibotError::DockerNotAvailable)?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        if !status.success() {
             return Err(AntibotError::PullFailed {
                 image: image.to_string(),
-                reason: stderr.trim().to_string(),
+                reason: format!(
+                    "`docker pull` exited with {status} (see streamed output above)"
+                ),
             });
         }
 
-        info!("pulled image: {}", image);
+        info!("pulled image {} in {}s", image, started.elapsed().as_secs());
         Ok(())
     }
 
