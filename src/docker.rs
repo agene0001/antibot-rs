@@ -5,6 +5,56 @@ use tracing::{debug, info, warn};
 
 const CONTAINER_NAME: &str = "antibot-solver";
 
+/// Run the daemon-start command with stdio detached.
+///
+/// The launcher's stdio must NOT be piped (`.output()`): on Windows,
+/// `cmd /C start "" "Docker Desktop.exe"` hands the pipe write-handles down to
+/// Docker Desktop itself, so reading the pipes to EOF blocks until Docker
+/// Desktop *exits* — the caller hangs forever right after launching it, and
+/// Docker Desktop is tethered to the caller's process tree (it dies when the
+/// caller is killed). Nulling stdio avoids both.
+///
+/// On Windows we additionally try `CREATE_BREAKAWAY_FROM_JOB` so Docker
+/// Desktop escapes the terminal/scheduler job object and survives the caller
+/// exiting; if the job forbids breakaway the spawn fails with access-denied,
+/// so we retry without the flag.
+async fn run_daemon_start(
+    program: &str,
+    args: &[String],
+) -> std::io::Result<std::process::ExitStatus> {
+    fn base(program: &str, args: &[String]) -> Command {
+        let mut cmd = Command::new(program);
+        cmd.args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        cmd
+    }
+
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+
+        let mut detached = base(program, args);
+        detached.creation_flags(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB);
+        match detached.status().await {
+            // Job object without JOB_OBJECT_LIMIT_BREAKAWAY_OK → retry attached.
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                debug!("job breakaway denied; launching daemon without it");
+                let mut attached = base(program, args);
+                attached.creation_flags(CREATE_NO_WINDOW);
+                attached.status().await
+            }
+            other => other,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        base(program, args).status().await
+    }
+}
+
 /// Best-effort command to start the Docker daemon on the current OS.
 /// `None` if we don't have a sensible default for this platform.
 fn default_daemon_start() -> Option<(String, Vec<String>)> {
@@ -168,20 +218,13 @@ impl DockerManager {
             args.join(" ")
         );
 
-        let output = Command::new(&program)
-            .args(&args)
-            .output()
-            .await
-            .map_err(|e| {
-                AntibotError::DaemonStartFailed(format!("could not run `{program}`: {e}"))
-            })?;
+        let status = run_daemon_start(&program, &args).await.map_err(|e| {
+            AntibotError::DaemonStartFailed(format!("could not run `{program}`: {e}"))
+        })?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        if !status.success() {
             return Err(AntibotError::DaemonStartFailed(format!(
-                "`{program}` failed ({}): {}",
-                output.status,
-                stderr.trim()
+                "`{program}` failed with {status}"
             )));
         }
 

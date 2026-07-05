@@ -5,6 +5,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.3.3]
 
+### Fixed
+
+- **Windows: launching Docker Desktop hung the caller forever and tethered
+  Docker Desktop to the caller's lifetime.** The daemon-start command ran via
+  `.output()`, which pipes stdout/stderr; `cmd /C start` hands those pipe
+  write-handles down to Docker Desktop, so reading to EOF blocked until Docker
+  Desktop *exited* — `build()` never returned (0.3.2's probe-timeout fix sits
+  after this point and never got the chance to matter), and killing the caller
+  took Docker Desktop down with it. The launcher now runs with stdio nulled
+  (`.status()`), and on Windows is spawned `CREATE_NO_WINDOW |
+  CREATE_BREAKAWAY_FROM_JOB` (falling back without breakaway where the job
+  forbids it) so Docker Desktop detaches from the caller's process tree and
+  survives it.
+
 ### Changed
 
 - **`docker pull` now streams progress instead of running silently.** The
